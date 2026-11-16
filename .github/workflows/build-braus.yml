@@ -47,9 +47,16 @@ jobs:
           test -x "$BIN"
           cp "$BIN" ./braus
           file ./braus
-          # CI 上没有辅助功能/录屏权限，只验它能起来并打印用法
-          ./braus --help  | tee help.txt || { echo "!! braus --help 失败"; exit 1; }
-          ./braus doctor  --json > doctor.json 2>doctor.err || echo "doctor 非 0（CI 无 GUI 权限，预期内）"
+          # CI 上没有辅助功能/录屏权限，只验它能起来并打印用法。
+          # 注意：braus --help 的退出码不是 0（实测打完用法仍返回非 0），
+          # 所以这里不能用 `|| exit 1` 直接判失败 —— 改成"必须打出 batch/scene 才算活"。
+          set +e
+          ./braus --help > help.txt 2>&1
+          echo "braus --help 退出码 = $? （非 0 是它的正常行为）"
+          set -e
+          grep -qi 'batch' help.txt || { echo "!! help 里没有 batch 子命令，产物不对"; exit 1; }
+          grep -qi 'scene'  help.txt || { echo "!! help 里没有 scene 子命令，产物不对"; exit 1; }
+          ./braus doctor --json > doctor.json 2>doctor.err || echo "doctor 非 0（CI 无 GUI 权限，预期内）"
 
       - name: 记录指纹
         id: fp
