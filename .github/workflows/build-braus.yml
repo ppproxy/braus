@@ -1,0 +1,90 @@
+name: build braus CLI
+
+# 装到我们 fork 的 .github/workflows/build-braus.yml
+# 目的：只产出一个 macOS arm64 的单文件 CLI（.build/release/braus），发成 Release asset 供匿名 curl。
+# 不构建 BrausApp（GUI）、不跑任何测试（上游 make test 在 main 上本身不绿）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的 ref（默认 main）"
+        required: false
+        default: "main"
+  push:
+    tags:
+      - "cli-*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: braus-cli
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: xcode-27          # GA 镜像：macOS 27 + Xcode 27 + Apple SDK，**仅 arm64**
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+
+      - name: 工具链自检
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          uname -m            # 必须是 arm64
+
+      - name: 构建 braus
+        run: |
+          set -euxo pipefail
+          swift build -c release --product braus 2>&1 | tail -40
+          BIN="$(swift build -c release --show-bin-path)/braus"
+          test -x "$BIN"
+          cp "$BIN" ./braus
+          file ./braus
+          # CI 上没有辅助功能/录屏权限，只验它能起来并打印用法
+          ./braus --help  | tee help.txt || { echo "!! braus --help 失败"; exit 1; }
+          ./braus doctor  --json > doctor.json 2>doctor.err || echo "doctor 非 0（CI 无 GUI 权限，预期内）"
+
+      - name: 记录指纹
+        id: fp
+        run: |
+          SHA=$(shasum -a 256 ./braus | awk '{print $1}')
+          SIZE=$(stat -f%z ./braus)
+          COMMIT=$(git rev-parse HEAD)
+          TAG="${GITHUB_REF_NAME}"
+          [ "${TAG#cli-}" = "$TAG" ] && TAG="cli-dev-$(date -u +%Y%m%d%H%M)"
+          {
+            echo "sha256=$SHA"; echo "size=$SIZE"; echo "commit=$COMMIT"; echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          printf '# braus CLI (%s)\n\n- 构建 commit: `%s`\n- sha256: `%s`\n- 大小: %s bytes\n- runner: macOS27/Xcode27 **arm64**（只能给 Apple Silicon 的机器用）\n\n```\n%s\n```\n' \
+            "$TAG" "$COMMIT" "$SHA" "$SIZE" "$(cat help.txt)" > notes.md
+
+      - name: 发 Release（asset 可匿名下载）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG="${{ steps.fp.outputs.tag }}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "${{ steps.fp.outputs.commit }}" \
+              --title "braus CLI $TAG" --notes-file notes.md
+          gh release upload "$TAG" ./braus --clobber
+          # 把匿名下载地址写进 job summary
+          URL=$(gh release view "$TAG" --json assets -q '.assets[0].url')
+          echo "download: $URL" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "sha256:   ${{ steps.fp.outputs.sha256 }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: braus-diagnostics
+          path: |
+            help.txt
+            doctor.json
+            doctor.err
